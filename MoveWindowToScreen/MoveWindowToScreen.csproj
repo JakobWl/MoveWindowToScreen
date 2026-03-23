@@ -8,8 +8,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Platforms>x64;AnyCPU</Platforms>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <Platforms>x64;x86;AnyCPU</Platforms>
+    <RuntimeIdentifiers>win-x64;win-x86</RuntimeIdentifiers>
     <AssemblyName>MoveWindowToScreen</AssemblyName>
     <RootNamespace>MoveWindowToScreen</RootNamespace>
     <Description>Move any window between monitors using a popup UI (Ctrl+Alt+M), system menu integration, or the system tray. Supports per-screen buttons, screen identification overlays, and Windows theme detection.</Description>
