@@ -202,6 +202,8 @@ internal static partial class NativeMethods
     public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
     public const uint EVENT_SYSTEM_MENUPOPUPSTART = 0x0006;
+    public const uint EVENT_SYSTEM_MENUSTART = 0x0004;
+    public const uint EVENT_SYSTEM_MENUPOPUPEND = 0x0007;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
