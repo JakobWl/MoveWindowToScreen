@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap5 desktop rescap">
+
+  <Identity Name="MoveWindowToScreen"
+            Publisher="CN=MoveWindowToScreen"
+            Version="1.0.0.0"
+            ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Move Window To Screen</DisplayName>
+    <PublisherDisplayName>MoveWindowToScreen</PublisherDisplayName>
+    <Description>Move any window between monitors using a popup UI (Ctrl+Alt+M), system menu integration (Shift+right-click), or the system tray. Features per-screen buttons, screen identification overlays, app icons, and Windows dark/light theme support.</Description>
+    <Logo>Images\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+                 Executable="MoveWindowToScreen.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+
+      <uap:VisualElements DisplayName="Move Window To Screen"
+                          Description="Move any window between monitors with Ctrl+Alt+M or Shift+right-click."
+                          BackgroundColor="#0078D4"
+                          Square150x150Logo="Images\Square150x150Logo.png"
+                          Square44x44Logo="Images\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Images\Wide310x150Logo.png"
+                         Square310x310Logo="Images\Square310x310Logo.png"
+                         Square71x71Logo="Images\SmallTile.png">
+        </uap:DefaultTile>
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- Allow the app to run as a startup task (background) -->
+        <desktop:Extension Category="windows.startupTask"
+                          Executable="MoveWindowToScreen.exe"
+                          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="MoveWindowToScreenStartup"
+                              Enabled="true"
+                              DisplayName="Move Window To Screen" />
+        </desktop:Extension>
+      </Extensions>
+
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>
