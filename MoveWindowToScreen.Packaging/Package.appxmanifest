@@ -9,7 +9,7 @@
   <Identity
     Name="Wideve.U.MoveWindowToScreen"
     Publisher="CN=2FB3D10A-81DA-44DA-AA5D-0E9816DC9FB2"
-    Version="1.0.0.0" />
+    Version="1.0.1.0" />
 
   <Properties>
     <DisplayName>Move Window To Screen</DisplayName>
