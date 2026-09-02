@@ -113,8 +113,14 @@ public partial class MovePopup : Window
     {
         if (sender is System.Windows.Controls.Button btn && btn.Tag is ScreenButtonInfo info)
         {
-            WindowMover.MoveWindowToMonitor(info.WindowHandle, info.MonitorHandle);
-            RefreshContent(); // Update the UI to reflect the move
+            // Move off the UI thread: SetWindowPos synchronously dispatches to
+            // the target window and can block for seconds if it is busy/hung.
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try { WindowMover.MoveWindowToMonitor(info.WindowHandle, info.MonitorHandle); }
+                catch { }
+            }).ContinueWith(_ => Dispatcher.Invoke(RefreshContent),
+                System.Threading.Tasks.TaskScheduler.Default);
         }
     }
 
@@ -130,8 +136,12 @@ public partial class MovePopup : Window
             // "Current screen" = the monitor this popup is displayed on
             var popupHwnd = new WindowInteropHelper(this).Handle;
             var currentMonitor = NativeMethods.MonitorFromWindow(popupHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-            WindowMover.MoveWindowToMonitor(hwnd, currentMonitor);
-            RefreshContent();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try { WindowMover.MoveWindowToMonitor(hwnd, currentMonitor); }
+                catch { }
+            }).ContinueWith(_ => Dispatcher.Invoke(RefreshContent),
+                System.Threading.Tasks.TaskScheduler.Default);
         }
     }
 
@@ -164,22 +174,12 @@ public partial class MovePopup : Window
                 Background = System.Windows.Media.Brushes.Transparent,
                 ShowInTaskbar = false,
                 Topmost = true,
+                ShowActivated = false, // never steal activation from the main popup
                 ResizeMode = ResizeMode.NoResize,
                 SizeToContent = SizeToContent.Manual,
+                Width = 360,
+                Height = 240,
             };
-
-            var dpi = VisualTreeHelper.GetDpi(this);
-            double scaleX = dpi.DpiScaleX;
-            double scaleY = dpi.DpiScaleY;
-
-            double left = mon.Bounds.Left / scaleX;
-            double top = mon.Bounds.Top / scaleY;
-            double height = mon.Bounds.Height / scaleY;
-
-            overlay.Width = 360 / scaleX;
-            overlay.Height = 240 / scaleY;
-            overlay.Left = left + 24;
-            overlay.Top = top + height - 240 / scaleY - 24;
 
             var border = new System.Windows.Controls.Border
             {
@@ -200,22 +200,43 @@ public partial class MovePopup : Window
 
             overlay.Content = border;
             overlay.Show();
+
+            // Position in physical pixels on the overlay's own monitor —
+            // WPF DIP conversion at placement time does not necessarily use
+            // the target monitor's DPI.
+            var ohwnd = new System.Windows.Interop.WindowInteropHelper(overlay).Handle;
+            uint odpiX = 0;
+            if (NativeMethods.GetDpiForMonitor(mon.Handle, 0, out odpiX, out _) != 0 || odpiX == 0)
+                odpiX = 96;
+            double oscale = odpiX / 96.0;
+            int ow = (int)(overlay.Width * oscale);
+            int oh = (int)(overlay.Height * oscale);
+            NativeMethods.SetWindowPos(ohwnd, IntPtr.Zero,
+                mon.Bounds.Left + (int)(24 * oscale),
+                mon.Bounds.Bottom - oh - (int)(24 * oscale),
+                0, 0,
+                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+
             _identifyWindows.Add(overlay);
         }
     }
 
     private void CloseIdentifyOverlays()
     {
-        foreach (var w in _identifyWindows)
-            w.Close();
+        // Copy + clear first: closing an overlay can deactivate this window,
+        // which re-enters this method via Window_Deactivated.
+        var list = _identifyWindows.ToList();
         _identifyWindows.Clear();
+        foreach (var w in list)
+        {
+            try { w.Close(); } catch { }
+        }
     }
 
     public void ShowCentered()
     {
         ApplyWindowsTheme();
         RefreshContent();
-        ShowIdentifyOverlays();
 
         // Center on the monitor where the mouse cursor is
         NativeMethods.GetCursorPos(out var pt);
@@ -223,20 +244,29 @@ public partial class MovePopup : Window
         var mi = new NativeMethods.MONITORINFO { cbSize = 40 };
         NativeMethods.GetMonitorInfo(hMon, ref mi);
 
-        var dpi = VisualTreeHelper.GetDpi(this);
-        double scaleX = dpi.DpiScaleX;
-        double scaleY = dpi.DpiScaleY;
-
-        double monWidth = mi.rcWork.Width / scaleX;
-        double monHeight = mi.rcWork.Height / scaleY;
-        double monLeft = mi.rcWork.Left / scaleX;
-        double monTop = mi.rcWork.Top / scaleY;
+        // Show the identify overlays BEFORE the main popup: windows shown later
+        // get activated, and an overlay stealing activation would trigger this
+        // window's Deactivated -> Hide().
+        ShowIdentifyOverlays();
 
         Show();
         UpdateLayout();
 
-        Left = monLeft + (monWidth - ActualWidth) / 2;
-        Top = monTop + (monHeight - ActualHeight) / 2;
+        // Position in physical pixels: reading GetDpi before Show would give
+        // the system DPI, and WPF's DIP placement does not necessarily use the
+        // target monitor's DPI — so compute physical coordinates directly.
+        uint dpiX = 0;
+        if (NativeMethods.GetDpiForMonitor(hMon, 0, out dpiX, out _) != 0 || dpiX == 0)
+            dpiX = 96;
+        double scale = dpiX / 96.0;
+
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        int physW = (int)(ActualWidth * scale);
+        int physH = (int)(ActualHeight * scale);
+        int physX = mi.rcWork.Left + (mi.rcWork.Width - physW) / 2;
+        int physY = mi.rcWork.Top + (mi.rcWork.Height - physH) / 2;
+        NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, physX, physY, 0, 0,
+            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
 
         Activate();
         Focus();
