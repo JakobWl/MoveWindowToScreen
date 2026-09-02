@@ -138,6 +138,9 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     public static partial IntPtr GetWindow(IntPtr hWnd, uint uCmd);
 
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
     // --- Shell hook ---
     [LibraryImport("user32.dll", EntryPoint = "SetWindowsHookExW")]
     public static partial IntPtr SetWindowsHookEx(int idHook, CallWndProcDelegate lpfn, IntPtr hMod, uint dwThreadId);
@@ -223,8 +226,14 @@ internal static partial class NativeMethods
     public const uint EVENT_SYSTEM_MENUPOPUPSTART = 0x0006;
     public const uint EVENT_SYSTEM_MENUSTART = 0x0004;
     public const uint EVENT_SYSTEM_MENUPOPUPEND = 0x0007;
+    public const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    public const uint EVENT_OBJECT_FOCUS = 0x8005;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+    public const int OBJID_WINDOW = 0;
+
+    // GetAncestor flags
+    public const uint GA_ROOT = 2;
 
     // System menu constants
     public const uint MF_BYPOSITION = 0x00000400;

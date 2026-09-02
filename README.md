@@ -12,7 +12,7 @@ A lightweight Windows background app that lets you move any window between monit
 - **Theme Aware**: Reads the Windows dark/light theme setting from the registry and styles the UI accordingly
 - **Smart Moving**: Preserves relative window position and size proportionally across screens
 - **Minimized Window Support**: Minimized windows are automatically restored and brought to the front when moved
-- **Restore on the Clicked Screen**: Left-clicking a minimized app's taskbar button on another monitor's taskbar restores the window onto that monitor instead of its original one
+- **Restore on the Clicked Screen**: Clicking a minimized app's taskbar button on another monitor's taskbar restores the window onto that monitor instead of its original one — works with mouse clicks and with touch/pen taps on touch displays
 - **Maximized Support**: Keeps maximized state — re-maximizes on the target monitor
 - **DPI Aware**: Works correctly with mixed-DPI multi-monitor setups
 - **Tray App Filtering**: Excludes tray-only programs and cloaked/suspended UWP apps from the window list

@@ -39,6 +39,51 @@ internal sealed class SystemMenuInjector : IDisposable
     private PopupButton? _hoveredButton;
     private DispatcherTimer? _menuWatchTimer;
 
+    // --- Restore-on-clicked/tapped-screen ---
+    //
+    // Clicking a minimized app's taskbar button restores the window on its
+    // ORIGINAL monitor (explorer's behavior). To place it on the monitor whose
+    // taskbar was actually clicked/tapped instead, two independent signals are
+    // correlated by time:
+    //   • WHICH taskbar was interacted with (its monitor):
+    //     - mouse: the low-level mouse hook gives the exact click position;
+    //       works on every monitor's taskbar.
+    //     - touch/pen, incl. pointer input injected by streaming tools such as
+    //       Moonlight/Sunshine (which never reaches the mouse hook and exposes
+    //       no parseable raw input): explorer raises EVENT_OBJECT_FOCUS on the
+    //       taskbar window when its button is pressed, so the event's taskbar
+    //       hwnd → MonitorFromWindow identifies the tapped monitor.
+    //   • WHICH window got restored: EVENT_SYSTEM_MINIMIZEEND, fired by the
+    //     window manager for every minimized→restored transition regardless of
+    //     the input that caused it.
+    //
+    // (UIA cannot help here: Win11 taskbar buttons expose no invoke/property
+    // events at all.)
+    private sealed class TaskbarInteractionRecord
+    {
+        public required IntPtr Monitor { get; init; }  // monitor of the interacted taskbar
+        public required long Time { get; init; }       // TickCount64
+        public bool Consumed;
+    }
+
+    private sealed class RestoreRecord
+    {
+        public required IntPtr Hwnd { get; init; }
+        public required long Time { get; init; }       // TickCount64
+        public bool Consumed;
+    }
+
+    private const long TapMatchWindowMs = 1500; // max |interaction − restore| distance
+    private const long RecordTtlMs = 2500;      // prune unmatched records after this
+    private const long InteractionBurstMs = 500; // signals from one press are collapsed
+    private readonly List<TaskbarInteractionRecord> _taskbarInteractions = [];
+    private readonly List<RestoreRecord> _restoreEvents = [];
+
+    private readonly NativeMethods.WinEventDelegate _restoreWinEventProc;
+    private readonly NativeMethods.WinEventDelegate _focusWinEventProc;
+    private IntPtr _restoreEventHook;
+    private IntPtr _focusEventHook;
+
     private sealed class PopupButton
     {
         public required Border Element { get; init; }
@@ -61,6 +106,201 @@ internal sealed class SystemMenuInjector : IDisposable
 
         _mouseHook = NativeMethods.SetMouseHookEx(
             NativeMethods.WH_MOUSE_LL, _mouseProc, IntPtr.Zero, 0);
+
+        // Restore detection: watch minimized→restored transitions (any input
+        // modality) and taskbar focus interactions (mouse, touch and pen).
+        _restoreWinEventProc = OnRestoreWinEvent;
+        _restoreEventHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_MINIMIZEEND, NativeMethods.EVENT_SYSTEM_MINIMIZEEND,
+            IntPtr.Zero, _restoreWinEventProc, 0, 0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
+
+        _focusWinEventProc = OnFocusWinEvent;
+        _focusEventHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_FOCUS, NativeMethods.EVENT_OBJECT_FOCUS,
+            IntPtr.Zero, _focusWinEventProc, 0, 0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
+    }
+
+    /// <summary>
+    /// EVENT_OBJECT_FOCUS: records when a taskbar window (or one of its XAML
+    /// island children) receives focus — explorer does this when any of its
+    /// taskbar buttons is pressed, for mouse, touch, pen and streaming-injected
+    /// pointer input alike. Events that belong to other explorer windows are
+    /// filtered out by walking up to the root window's class.
+    /// </summary>
+    private void OnFocusWinEvent(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+        int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
+    {
+        if (hwnd == IntPtr.Zero)
+            return;
+        // The event chain Explorer raises for a taskbar-button press covers the
+        // taskbar window itself and its island children; accept any of them and
+        // resolve the owning taskbar below.
+        var root = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+        if (root == IntPtr.Zero || !IsTaskbarWindow(root))
+            return;
+
+        var monitor = NativeMethods.MonitorFromWindow(root, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        // WINEVENT_OUTOFCONTEXT delivers this callback on the thread that
+        // registered the hook — the UI thread — so the bookkeeping below runs
+        // directly, preserving event order (the interaction precedes its restore).
+        RecordTaskbarInteraction(monitor);
+    }
+
+    private static bool IsTaskbarWindow(IntPtr hwnd)
+    {
+        var sb = new char[64];
+        int len = NativeMethods.GetClassName(hwnd, sb, sb.Length);
+        if (len <= 0)
+            return false;
+        var cls = new string(sb, 0, len);
+        return cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd";
+    }
+
+    /// <summary>
+    /// Records a taskbar interaction (mouse click or touch/pen tap) that may be
+    /// followed by the restore of a minimized window, then tries to pair it with
+    /// a restore event. Multiple signals may fire for one interaction (a mouse
+    /// click produces both a low-level-hook event and an explorer focus event;
+    /// one press also raises focus events on several windows) — collapsed per
+    /// monitor within a short burst.
+    /// </summary>
+    private void RecordTaskbarInteraction(IntPtr monitor)
+    {
+        if (_companionPopup != null)
+            return; // a system menu / companion popup is tracking, not a restore press
+        long now = Environment.TickCount64;
+        // One press produces several signals (a mouse click fires both the
+        // low-level-hook event and explorer focus events; one touch press
+        // raises focus events on several taskbar windows). Collapse that burst
+        // into a single record — but only while the previous record for this
+        // monitor is still unconsumed, so a deliberate second press shortly
+        // after the first restore was handled is not swallowed.
+        if (_taskbarInteractions.Any(i =>
+                i.Monitor == monitor && !i.Consumed && now - i.Time < InteractionBurstMs))
+            return;
+        _taskbarInteractions.Add(new TaskbarInteractionRecord
+        {
+            Monitor = monitor,
+            Time = now
+        });
+        MatchTaskbarRestores();
+    }
+
+    /// <summary>
+    /// EVENT_SYSTEM_MINIMIZEEND: a window just left the minimized state. Fired
+    /// by the window manager for every restore — mouse, touch, pen, keyboard or
+    /// programmatic — so it cleanly replaces the old "sample minimized windows
+    /// at click time and poll" approach, which raced with touch taps whose
+    /// notification only arrives after the restore.
+    /// </summary>
+    private void OnRestoreWinEvent(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+        int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
+    {
+        if (hwnd == IntPtr.Zero || idObject != NativeMethods.OBJID_WINDOW)
+            return;
+        // WINEVENT_OUTOFCONTEXT: this callback runs on the registering (UI)
+        // thread, so handle the bookkeeping directly.
+        // Restores this app itself performs (popup / companion-menu moves) must
+        // not be re-attributed to a recent taskbar interaction.
+        if (Environment.TickCount64 - WindowMover.LastOwnRestoreTick < 1000)
+            return;
+        _restoreEvents.Add(new RestoreRecord
+        {
+            Hwnd = hwnd,
+            Time = Environment.TickCount64
+        });
+        MatchTaskbarRestores();
+    }
+
+    /// <summary>
+    /// Pairs each recorded restore with an unconsumed taskbar interaction within
+    /// TapMatchWindowMs (either order — an interaction usually precedes the
+    /// restore it causes, but order is not relied on). Per restore the nearest
+    /// preceding interaction is preferred; otherwise the nearest that follows.
+    /// </summary>
+    private void MatchTaskbarRestores()
+    {
+        long now = Environment.TickCount64;
+        _taskbarInteractions.RemoveAll(i => now - i.Time > RecordTtlMs);
+        _restoreEvents.RemoveAll(r => now - r.Time > RecordTtlMs || !NativeMethods.IsWindow(r.Hwnd));
+
+        foreach (var restore in _restoreEvents.Where(r => !r.Consumed).OrderBy(r => r.Time).ToArray())
+        {
+            TaskbarInteractionRecord? interaction = _taskbarInteractions
+                .Where(i => !i.Consumed && i.Time <= restore.Time && restore.Time - i.Time <= TapMatchWindowMs)
+                .OrderBy(i => restore.Time - i.Time)   // nearest preceding first
+                .FirstOrDefault();
+            interaction ??= _taskbarInteractions
+                .Where(i => !i.Consumed && i.Time > restore.Time && i.Time - restore.Time <= TapMatchWindowMs)
+                .OrderBy(i => i.Time - restore.Time)
+                .FirstOrDefault();
+            if (interaction == null)
+                continue;
+
+            interaction.Consumed = true;
+            restore.Consumed = true;
+            MoveRestoredWindowTo(restore.Hwnd, interaction.Monitor);
+        }
+    }
+
+    /// <summary>
+    /// Waits for a just-restored window's restore animation to settle, then
+    /// moves it to the monitor whose taskbar was clicked/tapped. A taskbar
+    /// restore always activates the window — if it isn't the foreground window
+    /// by then, something else restored it; don't touch it.
+    /// </summary>
+    private void MoveRestoredWindowTo(IntPtr hwnd, IntPtr targetMon)
+    {
+        int attempts = 0;
+        bool hasCandidate = false;
+        NativeMethods.RECT candidateRect = default;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        timer.Tick += (_, _) =>
+        {
+            attempts++;
+            if (!NativeMethods.IsWindow(hwnd) || NativeMethods.IsIconic(hwnd))
+            {
+                // Gone or re-minimized — nothing to do.
+                timer.Stop();
+                return;
+            }
+            // During the restore animation the rect morphs from the taskbar
+            // position (and starts as the (-32000) minimized placeholder) —
+            // wait until it is valid AND stable across two polls before moving.
+            NativeMethods.GetWindowRect(hwnd, out var r);
+            if (r.Left < -10000)
+            {
+                if (attempts >= 10) timer.Stop(); // ~3s then give up
+                return;
+            }
+            if (!hasCandidate
+                || r.Left != candidateRect.Left || r.Top != candidateRect.Top
+                || r.Right != candidateRect.Right || r.Bottom != candidateRect.Bottom)
+            {
+                hasCandidate = true;
+                candidateRect = r;
+                if (attempts >= 10) timer.Stop();
+                return;
+            }
+            timer.Stop();
+            // A taskbar restore always activates the window — if it isn't the
+            // foreground window, something else restored it; don't touch it.
+            if (NativeMethods.GetForegroundWindow() != hwnd)
+                return;
+            var h = hwnd;
+            var mon = targetMon;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    WindowMover.MoveWindowToMonitor(h, mon);
+                }
+                catch { }
+            });
+        };
+        timer.Start();
     }
 
     private void OnWinEvent(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
@@ -121,11 +361,16 @@ internal sealed class SystemMenuInjector : IDisposable
                 var d = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
 
                 // Restore-to-clicked-screen: a left click on a taskbar button
-                // restores a minimized window on its ORIGINAL monitor (that's
-                // explorer's behavior). If the click happened on a different
-                // monitor's taskbar, move the restored window there instead.
+                // restores a minimized window on its ORIGINAL monitor. If the
+                // click was on another monitor's taskbar, move the window there
+                // (RecordTaskbarInteraction / MatchTaskbarRestores). Mouse
+                // clicks reach this hook on every taskbar; pointer-only input
+                // (touch / streaming) is caught by OnFocusWinEvent instead.
                 if (_companionPopup == null && IsOverTaskbar(d.pt))
-                    WatchForTaskbarRestore(d.pt);
+                {
+                    var mon = NativeMethods.MonitorFromPoint(d.pt, NativeMethods.MONITOR_DEFAULTTONEAREST);
+                    RecordTaskbarInteraction(mon);
+                }
             }
 
             // Shift+right-click on a taskbar button. On Windows 11 the taskbar
@@ -229,75 +474,6 @@ internal sealed class SystemMenuInjector : IDisposable
         return over;
     }
 
-    /// <summary>
-    /// After a left click on a taskbar button, watches for a window transitioning
-    /// from minimized to restored and moves it to the monitor that was clicked.
-    /// </summary>
-    private void WatchForTaskbarRestore(NativeMethods.POINT clickPt)
-    {
-        // Snapshot currently-minimized windows
-        var minimized = new HashSet<IntPtr>();
-        NativeMethods.EnumWindows((hwnd, _) =>
-        {
-            if (NativeMethods.IsIconic(hwnd)) minimized.Add(hwnd);
-            return true;
-        }, IntPtr.Zero);
-        if (minimized.Count == 0) return;
-
-        int attempts = 0;
-        IntPtr candidate = IntPtr.Zero;
-        NativeMethods.RECT candidateRect = default;
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-        timer.Tick += (_, _) =>
-        {
-            attempts++;
-            IntPtr restored = IntPtr.Zero;
-            NativeMethods.RECT restoredRect = default;
-            foreach (var h in minimized)
-            {
-                if (!NativeMethods.IsWindow(h) || NativeMethods.IsIconic(h)) continue;
-                // During the restore animation the rect morphs from the taskbar
-                // position (and starts as the (-32000) placeholder) — wait until
-                // it is valid AND stable across two polls before moving.
-                NativeMethods.GetWindowRect(h, out var r);
-                if (r.Left < -10000) continue;
-                restored = h;
-                restoredRect = r;
-                break;
-            }
-            if (restored == IntPtr.Zero)
-            {
-                if (attempts >= 10) timer.Stop(); // ~3s then give up
-                return;
-            }
-            if (restored != candidate
-                || restoredRect.Left != candidateRect.Left || restoredRect.Top != candidateRect.Top
-                || restoredRect.Right != candidateRect.Right || restoredRect.Bottom != candidateRect.Bottom)
-            {
-                // Still animating — remember and re-check on the next tick.
-                candidate = restored;
-                candidateRect = restoredRect;
-                if (attempts >= 10) timer.Stop();
-                return;
-            }
-            timer.Stop();
-            // A taskbar restore always activates the window — if it isn't the
-            // foreground window, something else restored it; don't touch it.
-            if (NativeMethods.GetForegroundWindow() != restored)
-                return;
-            var hwnd = restored;
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    var targetMon = NativeMethods.MonitorFromPoint(clickPt, NativeMethods.MONITOR_DEFAULTTONEAREST);
-                    WindowMover.MoveWindowToMonitor(hwnd, targetMon);
-                }
-                catch { }
-            });
-        };
-        timer.Start();
-    }
 
     private static bool IsMovableAppWindow(IntPtr hwnd)
     {
@@ -691,6 +867,18 @@ internal sealed class SystemMenuInjector : IDisposable
     public void Dispose()
     {
         CloseCompanionPopup();
+
+        if (_focusEventHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_focusEventHook);
+            _focusEventHook = IntPtr.Zero;
+        }
+
+        if (_restoreEventHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_restoreEventHook);
+            _restoreEventHook = IntPtr.Zero;
+        }
 
         if (_winEventHook != IntPtr.Zero)
         {

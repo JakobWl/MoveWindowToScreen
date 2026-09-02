@@ -6,6 +6,20 @@ namespace MoveWindowToScreen;
 internal static class WindowMover
 {
     /// <summary>
+    /// TickCount64 of the last time this app itself restored a minimized window
+    /// (popup / companion-menu moves). Used to keep those restores from being
+    /// mistaken for taskbar-initiated restores by the restore-to-clicked-screen
+    /// watcher in SystemMenuInjector. Written from background threads
+    /// (MoveWindowToMonitor may run inside Task.Run), so accessed volatile.
+    /// </summary>
+    private static long _lastOwnRestoreTick;
+    public static long LastOwnRestoreTick
+    {
+        get => Volatile.Read(ref _lastOwnRestoreTick);
+        set => Volatile.Write(ref _lastOwnRestoreTick, value);
+    }
+
+    /// <summary>
     /// Moves the currently active (foreground) window to the monitor where the mouse cursor is.
     /// </summary>
     public static void MoveActiveWindowToCurrentScreen()
@@ -44,7 +58,10 @@ internal static class WindowMover
         if (targetMonitor == sourceMonitor)
         {
             if (isMinimized)
+            {
+                LastOwnRestoreTick = Environment.TickCount64;
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+            }
             NativeMethods.SetForegroundWindow(hwnd);
             return;
         }
@@ -57,7 +74,10 @@ internal static class WindowMover
         // via SetWindowPlacement does NOT work — Windows ignores the new
         // position (verified on Win11), so restore-then-move is required.
         if (isMinimized)
+        {
+            LastOwnRestoreTick = Environment.TickCount64;
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+        }
 
         bool wasMaximized = NativeMethods.IsZoomed(hwnd);
 
