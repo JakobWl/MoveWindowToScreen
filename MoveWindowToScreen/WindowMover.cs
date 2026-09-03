@@ -6,17 +6,46 @@ namespace MoveWindowToScreen;
 internal static class WindowMover
 {
     /// <summary>
-    /// TickCount64 of the last time this app itself restored a minimized window
+    /// Recent (hwnd, tick) pairs of minimized windows this app itself restored
     /// (popup / companion-menu moves). Used to keep those restores from being
     /// mistaken for taskbar-initiated restores by the restore-to-clicked-screen
-    /// watcher in SystemMenuInjector. Written from background threads
-    /// (MoveWindowToMonitor may run inside Task.Run), so accessed volatile.
+    /// watcher in SystemMenuInjector. A small list rather than a single slot:
+    /// rapid popup moves can restore several windows concurrently, and a
+    /// delayed EVENT_SYSTEM_MINIMIZEEND for the first window must not escape
+    /// suppression just because a second restore overwrote the slot.
+    /// Writers are background threads (MoveWindowToMonitor may run inside
+    /// Task.Run), the reader is the UI thread — guarded by a lock so the
+    /// (hwnd, tick) pair can never be observed torn.
     /// </summary>
-    private static long _lastOwnRestoreTick;
-    public static long LastOwnRestoreTick
+    private const long OwnRestoreSuppressMs = 1000;
+    private static readonly List<(IntPtr Hwnd, long Tick)> _ownRestores = [];
+    private static readonly object _ownRestoresLock = new();
+
+    /// <summary>Records that this app is about to restore the given minimized window.</summary>
+    public static void RecordOwnRestore(IntPtr hwnd)
     {
-        get => Volatile.Read(ref _lastOwnRestoreTick);
-        set => Volatile.Write(ref _lastOwnRestoreTick, value);
+        lock (_ownRestoresLock)
+        {
+            long now = Environment.TickCount64;
+            _ownRestores.RemoveAll(r => now - r.Tick > OwnRestoreSuppressMs);
+            _ownRestores.Add((hwnd, now));
+        }
+    }
+
+    /// <summary>
+    /// True if this app itself restored the given window within the last
+    /// second — its EVENT_SYSTEM_MINIMIZEEND must not be re-attributed to a
+    /// taskbar interaction. Other windows' restores are unaffected, unlike a
+    /// blanket time-based suppression.
+    /// </summary>
+    public static bool WasRecentlyRestoredByUs(IntPtr hwnd)
+    {
+        lock (_ownRestoresLock)
+        {
+            long now = Environment.TickCount64;
+            _ownRestores.RemoveAll(r => now - r.Tick > OwnRestoreSuppressMs);
+            return _ownRestores.Any(r => r.Hwnd == hwnd);
+        }
     }
 
     /// <summary>
@@ -59,7 +88,7 @@ internal static class WindowMover
         {
             if (isMinimized)
             {
-                LastOwnRestoreTick = Environment.TickCount64;
+                RecordOwnRestore(hwnd);
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
             }
             NativeMethods.SetForegroundWindow(hwnd);
@@ -75,7 +104,7 @@ internal static class WindowMover
         // position (verified on Win11), so restore-then-move is required.
         if (isMinimized)
         {
-            LastOwnRestoreTick = Environment.TickCount64;
+            RecordOwnRestore(hwnd);
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
         }
 

@@ -73,11 +73,22 @@ internal sealed class SystemMenuInjector : IDisposable
         public bool Consumed;
     }
 
-    private const long TapMatchWindowMs = 1500; // max |interaction − restore| distance
+    private const long TapMatchWindowMs = 1500;  // max interaction → restore lead time
+    private const long LateInteractionMs = 400;  // max restore → interaction lag: touch /
+                                                 // streaming focus notifications can trail the
+                                                 // restore they caused, but only ever by a few
+                                                 // hundred ms — a wider window lets stale,
+                                                 // unrelated restores (Alt+Tab & co.) steal a
+                                                 // later tap and get teleported by it
     private const long RecordTtlMs = 2500;      // prune unmatched records after this
     private const long InteractionBurstMs = 500; // signals from one press are collapsed
     private readonly List<TaskbarInteractionRecord> _taskbarInteractions = [];
     private readonly List<RestoreRecord> _restoreEvents = [];
+
+    // In-flight settle timers from MoveRestoredWindowTo — tracked so Dispose
+    // can stop them instead of letting them move windows for up to ~3s after
+    // the injector is gone.
+    private readonly List<DispatcherTimer> _pairingTimers = [];
 
     private readonly NativeMethods.WinEventDelegate _restoreWinEventProc;
     private readonly NativeMethods.WinEventDelegate _focusWinEventProc;
@@ -203,8 +214,10 @@ internal sealed class SystemMenuInjector : IDisposable
         // WINEVENT_OUTOFCONTEXT: this callback runs on the registering (UI)
         // thread, so handle the bookkeeping directly.
         // Restores this app itself performs (popup / companion-menu moves) must
-        // not be re-attributed to a recent taskbar interaction.
-        if (Environment.TickCount64 - WindowMover.LastOwnRestoreTick < 1000)
+        // not be re-attributed to a recent taskbar interaction. Suppression is
+        // per-window so an unrelated user restore shortly after one of ours is
+        // still relocated normally.
+        if (WindowMover.WasRecentlyRestoredByUs(hwnd))
             return;
         _restoreEvents.Add(new RestoreRecord
         {
@@ -215,10 +228,16 @@ internal sealed class SystemMenuInjector : IDisposable
     }
 
     /// <summary>
-    /// Pairs each recorded restore with an unconsumed taskbar interaction within
-    /// TapMatchWindowMs (either order — an interaction usually precedes the
-    /// restore it causes, but order is not relied on). Per restore the nearest
-    /// preceding interaction is preferred; otherwise the nearest that follows.
+    /// Pairs each recorded restore with an unconsumed taskbar interaction. An
+    /// interaction usually precedes the restore it causes (mouse hook and
+    /// explorer focus event both fire at press time), so the nearest preceding
+    /// interaction within TapMatchWindowMs is preferred. But focus events and
+    /// MINIMIZEEND originate in different processes and are only stamped when
+    /// this UI thread processes them, so a genuine touch/streaming interaction
+    /// can be recorded slightly AFTER its restore — matched with a much tighter
+    /// window (LateInteractionMs): any real notification lag is a few hundred
+    /// ms at most, while anything older would just be an unrelated restore
+    /// (Alt+Tab, Win+number) stealing the tap and getting teleported by it.
     /// </summary>
     private void MatchTaskbarRestores()
     {
@@ -233,7 +252,7 @@ internal sealed class SystemMenuInjector : IDisposable
                 .OrderBy(i => restore.Time - i.Time)   // nearest preceding first
                 .FirstOrDefault();
             interaction ??= _taskbarInteractions
-                .Where(i => !i.Consumed && i.Time > restore.Time && i.Time - restore.Time <= TapMatchWindowMs)
+                .Where(i => !i.Consumed && i.Time > restore.Time && i.Time - restore.Time <= LateInteractionMs)
                 .OrderBy(i => i.Time - restore.Time)
                 .FirstOrDefault();
             if (interaction == null)
@@ -257,13 +276,19 @@ internal sealed class SystemMenuInjector : IDisposable
         bool hasCandidate = false;
         NativeMethods.RECT candidateRect = default;
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _pairingTimers.Add(timer);
+        void StopTimer()
+        {
+            timer.Stop();
+            _pairingTimers.Remove(timer);
+        }
         timer.Tick += (_, _) =>
         {
             attempts++;
             if (!NativeMethods.IsWindow(hwnd) || NativeMethods.IsIconic(hwnd))
             {
                 // Gone or re-minimized — nothing to do.
-                timer.Stop();
+                StopTimer();
                 return;
             }
             // During the restore animation the rect morphs from the taskbar
@@ -272,7 +297,7 @@ internal sealed class SystemMenuInjector : IDisposable
             NativeMethods.GetWindowRect(hwnd, out var r);
             if (r.Left < -10000)
             {
-                if (attempts >= 10) timer.Stop(); // ~3s then give up
+                if (attempts >= 10) StopTimer(); // ~3s then give up
                 return;
             }
             if (!hasCandidate
@@ -281,10 +306,10 @@ internal sealed class SystemMenuInjector : IDisposable
             {
                 hasCandidate = true;
                 candidateRect = r;
-                if (attempts >= 10) timer.Stop();
+                if (attempts >= 10) StopTimer();
                 return;
             }
-            timer.Stop();
+            StopTimer();
             // A taskbar restore always activates the window — if it isn't the
             // foreground window, something else restored it; don't touch it.
             if (NativeMethods.GetForegroundWindow() != hwnd)
@@ -295,6 +320,11 @@ internal sealed class SystemMenuInjector : IDisposable
             {
                 try
                 {
+                    // Re-check on the worker thread: if the user activated
+                    // another window since the settle check, moving anyway
+                    // would end in SetForegroundWindow stealing the focus back.
+                    if (NativeMethods.GetForegroundWindow() != h)
+                        return;
                     WindowMover.MoveWindowToMonitor(h, mon);
                 }
                 catch { }
@@ -867,6 +897,12 @@ internal sealed class SystemMenuInjector : IDisposable
     public void Dispose()
     {
         CloseCompanionPopup();
+
+        foreach (var timer in _pairingTimers.ToArray())
+            timer.Stop();
+        _pairingTimers.Clear();
+        _taskbarInteractions.Clear();
+        _restoreEvents.Clear();
 
         if (_focusEventHook != IntPtr.Zero)
         {
