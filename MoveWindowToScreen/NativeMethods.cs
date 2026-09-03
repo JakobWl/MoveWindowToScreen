@@ -61,10 +61,25 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool GetCursorPos(out POINT lpPoint);
 
+    [LibraryImport("user32.dll")]
+    public static partial uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool IsWindow(IntPtr hWnd);
+
     // --- DPI awareness ---
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetProcessDPIAware();
+
+    [DllImport("user32.dll")]
+    public static extern short GetKeyState(int nVirtKey);
+
+    // GetDpiForMonitor: returns the true physical DPI of a monitor regardless
+    // of the calling/referenced thread's DPI awareness. dpiType: 0 = MDT_EFFECTIVE_DPI.
+    [LibraryImport("shcore.dll")]
+    public static partial int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     // --- Monitor enumeration ---
     public delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
@@ -123,6 +138,9 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     public static partial IntPtr GetWindow(IntPtr hWnd, uint uCmd);
 
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
     // --- Shell hook ---
     [LibraryImport("user32.dll", EntryPoint = "SetWindowsHookExW")]
     public static partial IntPtr SetWindowsHookEx(int idHook, CallWndProcDelegate lpfn, IntPtr hMod, uint dwThreadId);
@@ -165,7 +183,6 @@ internal static partial class NativeMethods
     // --- Menu item detection ---
     [LibraryImport("user32.dll")]
     public static partial IntPtr WindowFromPoint(POINT Point);
-
     [LibraryImport("user32.dll", EntryPoint = "GetClassNameW", StringMarshalling = StringMarshalling.Utf16)]
     public static partial int GetClassName(IntPtr hWnd, [Out] char[] lpClassName, int nMaxCount);
 
@@ -178,9 +195,14 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
     public static partial IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
     // Constants
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const int SW_RESTORE = 9;
     public const int SW_SHOWMAXIMIZED = 3;
@@ -204,8 +226,14 @@ internal static partial class NativeMethods
     public const uint EVENT_SYSTEM_MENUPOPUPSTART = 0x0006;
     public const uint EVENT_SYSTEM_MENUSTART = 0x0004;
     public const uint EVENT_SYSTEM_MENUPOPUPEND = 0x0007;
+    public const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    public const uint EVENT_OBJECT_FOCUS = 0x8005;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+    public const int OBJID_WINDOW = 0;
+
+    // GetAncestor flags
+    public const uint GA_ROOT = 2;
 
     // System menu constants
     public const uint MF_BYPOSITION = 0x00000400;
@@ -226,6 +254,7 @@ internal static partial class NativeMethods
     public const int GWL_STYLE = -16;
     public const int GWL_EXSTYLE = -20;
     public const int WS_VISIBLE = 0x10000000;
+    public const int WS_SYSMENU = 0x00080000;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_APPWINDOW = 0x00040000;
     public const uint GW_OWNER = 4;
@@ -254,6 +283,13 @@ internal static partial class NativeMethods
     // Messages
     public const int WM_SYSCOMMAND = 0x0112;
     public const int WM_LBUTTONUP = 0x0202;
+    public const int WM_LBUTTONDOWN = 0x0201;
+    public const int WM_MOUSEMOVE = 0x0200;
+    public const int WM_KEYDOWN = 0x0100;
+    public const int WM_KEYUP = 0x0101;
+    public const int VK_ESCAPE = 0x1B;
+    public const int WM_RBUTTONDOWN = 0x0204;
+    public const int VK_SHIFT = 0x10;
     public const int WH_CALLWNDPROC = 4;
     public const int WH_MOUSE_LL = 14;
     public const int HSHELL_WINDOWCREATED = 1;
