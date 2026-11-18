@@ -100,7 +100,7 @@ internal static partial class NativeMethods
     public static partial bool AppendMenu(IntPtr hMenu, uint uFlags, nuint uIDNewItem, string lpNewItem);
 
     // --- Hotkey ---
-    [LibraryImport("user32.dll")]
+    [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
@@ -122,6 +122,21 @@ internal static partial class NativeMethods
 
     [LibraryImport("user32.dll")]
     public static partial IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetAncestor(IntPtr hwnd, uint flags);
+
+    [LibraryImport("user32.dll")]
+    public static partial uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetShellWindow();
+
+    public const uint GA_ROOT = 2;
+    public const int WS_SYSMENU = 0x00080000;
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint MOD_SHIFT = 0x0004;
+
 
     // --- Shell hook ---
     [LibraryImport("user32.dll", EntryPoint = "SetWindowsHookExW")]

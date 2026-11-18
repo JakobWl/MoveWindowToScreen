@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.IO;
-using System.Reflection;
+using System.Runtime.InteropServices;
+using MessageBox = System.Windows.MessageBox;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Forms;
@@ -14,8 +15,8 @@ namespace MoveWindowToScreen;
 
 /// <summary>
 /// Manages the system tray icon and the modern popup UI.
-/// Left-click or hotkey (Ctrl+Alt+M) shows the popup.
-/// Right-click shows a simple context menu with Exit.
+/// Left-click or the configured shortcut shows the popup.
+/// Right-click opens settings and commands.
 /// </summary>
 internal sealed class TrayIconManager : IDisposable
 {
@@ -24,11 +25,12 @@ internal sealed class TrayIconManager : IDisposable
     private readonly Application _app;
     private MovePopup? _popup;
 
-    // Hotkey
-    private const int HOTKEY_ID = 9002;
-    private const uint VK_M = 0x4D;
+    private const int FirstHotkeyId = 9002;
+    private const int SecondHotkeyId = 9003;
     private HwndSource? _hotkeyWindow;
-    private bool _hotkeyRegistered;
+    private int _registeredHotkeyId;
+    private Shortcut _shortcut = Shortcut.Default;
+    private bool _choosingShortcut;
 
     public TrayIconManager(Application app)
     {
@@ -36,7 +38,7 @@ internal sealed class TrayIconManager : IDisposable
 
         _notifyIcon = new NotifyIcon
         {
-            Text = "Move Window To Screen (Ctrl+Alt+M)",
+            Text = "Move Window To Screen",
             Visible = true
         };
 
@@ -57,44 +59,91 @@ internal sealed class TrayIconManager : IDisposable
                 ShowTrayContextMenu();
         };
 
-        // Register Ctrl+Alt+M hotkey
-        RegisterHotkey();
-    }
-
-    private void RegisterHotkey()
-    {
         var parameters = new HwndSourceParameters("MoveWindowToScreen_Hotkey")
         {
             Width = 0, Height = 0, WindowStyle = 0
         };
         _hotkeyWindow = new HwndSource(parameters);
         _hotkeyWindow.AddHook(HotkeyWndProc);
-
-        _hotkeyRegistered = NativeMethods.RegisterHotKey(
-            _hotkeyWindow.Handle, HOTKEY_ID,
-            NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_NOREPEAT,
-            VK_M);
-
-        if (!_hotkeyRegistered)
+        _shortcut = Shortcut.Load();
+        string? error = RegisterShortcut(_shortcut, save: false);
+        if (error != null)
         {
-            _notifyIcon.ShowBalloonTip(3000, "Move Window To Screen",
-                "Could not register Ctrl+Alt+M hotkey. Click the tray icon instead.",
-                ToolTipIcon.Warning);
+            _app.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (MessageBox.Show(
+                    $"{error} Do you want to set a different shortcut? You can also open the app from the tray.",
+                    "Keyboard shortcut unavailable", MessageBoxButton.YesNo, MessageBoxImage.Warning) ==
+                    MessageBoxResult.Yes)
+                    ShowShortcutDialog();
+            }));
+        }
+    }
+
+    private string? RegisterShortcut(Shortcut shortcut, bool save)
+    {
+        if (_registeredHotkeyId != 0 && _shortcut == shortcut)
+            return null;
+
+        var hwnd = _hotkeyWindow!.Handle;
+        int nextId = _registeredHotkeyId == FirstHotkeyId ? SecondHotkeyId : FirstHotkeyId;
+        uint key = (uint)System.Windows.Input.KeyInterop.VirtualKeyFromKey(shortcut.Key);
+        if (!NativeMethods.RegisterHotKey(hwnd, nextId, shortcut.NativeModifiers, key))
+        {
+            int error = Marshal.GetLastPInvokeError();
+            return error == 1409
+                ? $"{shortcut} is already in use."
+                : $"Windows could not register {shortcut} (error {error}).";
+        }
+
+        if (save)
+        {
+            try
+            {
+                shortcut.Save();
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                NativeMethods.UnregisterHotKey(hwnd, nextId);
+                return "The shortcut could not be saved. Your previous shortcut is still selected.";
+            }
+        }
+
+        if (_registeredHotkeyId != 0)
+            NativeMethods.UnregisterHotKey(hwnd, _registeredHotkeyId);
+
+        _registeredHotkeyId = nextId;
+        _shortcut = shortcut;
+        _notifyIcon.Text = $"Move Window To Screen ({shortcut})";
+        return null;
+    }
+
+    private void ShowShortcutDialog()
+    {
+        _choosingShortcut = true;
+        try
+        {
+            new ShortcutDialog(_shortcut, shortcut => RegisterShortcut(shortcut, save: true)).ShowDialog();
+        }
+        finally
+        {
+            _choosingShortcut = false;
         }
     }
 
     private IntPtr HotkeyWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         const int WM_HOTKEY = 0x0312;
-        if (msg == WM_HOTKEY && wParam.ToInt32() == HOTKEY_ID)
+        if (msg == WM_HOTKEY && _registeredHotkeyId != 0 && wParam.ToInt32() == _registeredHotkeyId)
         {
-            ShowPopup();
+            if (!_choosingShortcut)
+                ShowPopup();
             handled = true;
         }
         return IntPtr.Zero;
     }
 
-    private void ShowTrayContextMenu()
+    private async void ShowTrayContextMenu()
     {
         bool isDark = true;
         try
@@ -156,7 +205,37 @@ internal sealed class TrayIconManager : IDisposable
             _app.Shutdown();
         };
 
+        var shortcutItem = new MenuItem { Header = "Change keyboard shortcut…" };
+        shortcutItem.Click += (_, _) => ShowShortcutDialog();
+
+        var startupItem = new MenuItem();
+        try
+        {
+            bool startupEnabled = await SignInStartup.IsEnabledAsync();
+            startupItem.Header = startupEnabled ? "Start at sign-in (on)" : "Start at sign-in (off)";
+            startupItem.Click += async (_, _) =>
+            {
+                try
+                {
+                    await SignInStartup.SetEnabledAsync(!startupEnabled);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Could not change startup setting",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            startupItem.Header = "Start at sign-in (unavailable)";
+            startupItem.Click += (_, _) => MessageBox.Show(ex.Message, "Startup setting unavailable",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
         ctxMenu.Items.Add(showItem);
+        ctxMenu.Items.Add(shortcutItem);
+        ctxMenu.Items.Add(startupItem);
         ctxMenu.Items.Add(new Separator());
         ctxMenu.Items.Add(exitItem);
 
@@ -233,21 +312,19 @@ internal sealed class TrayIconManager : IDisposable
 
     private static Icon LoadAppIcon()
     {
-        var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
-        var iconPath = Path.Combine(exeDir, "Assets", "app.ico");
-        if (File.Exists(iconPath))
-            return new Icon(iconPath);
+        var resource = Application.GetResourceStream(new Uri("Assets/app.ico", UriKind.Relative));
+        if (resource == null)
+            return SystemIcons.Application;
 
-        return SystemIcons.Application;
+        using var stream = resource.Stream;
+        using var icon = new Icon(stream);
+        return (Icon)icon.Clone();
     }
 
     public void Dispose()
     {
-        if (_hotkeyRegistered && _hotkeyWindow != null)
-        {
-            NativeMethods.UnregisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID);
-            _hotkeyRegistered = false;
-        }
+        if (_registeredHotkeyId != 0 && _hotkeyWindow != null)
+            NativeMethods.UnregisterHotKey(_hotkeyWindow.Handle, _registeredHotkeyId);
         _hotkeyWindow?.Dispose();
         _popup?.Close();
         _menuInjector.Dispose();

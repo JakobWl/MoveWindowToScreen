@@ -69,10 +69,6 @@ public partial class MovePopup : Window
         var items = new List<WindowItem>();
         foreach (var (hwnd, title) in windows)
         {
-            // Skip our own popup
-            var thisHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-            if (hwnd == thisHwnd) continue;
-
             var currentMonitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
             string screenLabel = "Unknown screen";
             foreach (var m in monitors)
@@ -284,36 +280,59 @@ public partial class MovePopup : Window
     private static List<(IntPtr hwnd, string title)> GetTopLevelWindows()
     {
         var result = new List<(IntPtr, string)>();
-        var buffer = new char[256];
+        var buffer = new char[512];
+        var shellWindow = NativeMethods.GetShellWindow();
 
-        NativeMethods.EnumWindows((hWnd, _) =>
+        NativeMethods.EnumWindows((hwnd, _) =>
         {
-            if (!NativeMethods.IsWindowVisible(hWnd))
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint processId);
+            if (hwnd == shellWindow || processId == Environment.ProcessId ||
+                !NativeMethods.IsWindowVisible(hwnd))
                 return true;
 
-            int exStyle = NativeMethods.GetWindowLongA(hWnd, NativeMethods.GWL_EXSTYLE);
-            if ((exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0)
+            int exStyle = NativeMethods.GetWindowLongA(hwnd, NativeMethods.GWL_EXSTYLE);
+            bool appearsOnTaskbar = (exStyle & NativeMethods.WS_EX_APPWINDOW) != 0;
+            var owner = NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER);
+            if (!appearsOnTaskbar && ((exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0 ||
+                (owner != IntPtr.Zero && NativeMethods.IsWindowVisible(owner))))
                 return true;
 
-            var owner = NativeMethods.GetWindow(hWnd, NativeMethods.GW_OWNER);
-            if (owner != IntPtr.Zero)
-                return true;
-
-            int len = NativeMethods.GetWindowText(hWnd, buffer, buffer.Length);
-            if (len <= 0)
-                return true;
-
-            // Skip cloaked windows (hidden UWP/suspended apps)
-            if (NativeMethods.DwmGetWindowAttribute(hWnd, NativeMethods.DWMWA_CLOAKED,
+            if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED,
                     out int cloaked, sizeof(int)) == 0 && cloaked != 0)
                 return true;
 
-            // Skip windows with zero or tiny size (tray-only apps)
-            NativeMethods.GetWindowRect(hWnd, out var rect);
-            if (rect.Width <= 1 || rect.Height <= 1)
+            if (!NativeMethods.GetWindowRect(hwnd, out var rect) || rect.Width <= 1 || rect.Height <= 1)
                 return true;
 
-            result.Add((hWnd, new string(buffer, 0, len)));
+            int length = NativeMethods.GetWindowText(hwnd, buffer, buffer.Length);
+            string title = new string(buffer, 0, length).Trim();
+            if (title.Length == 0)
+            {
+                // Custom-drawn windows can have a title in their UI but no Win32 caption.
+                int style = NativeMethods.GetWindowLongA(hwnd, NativeMethods.GWL_STYLE);
+                if (!appearsOnTaskbar && (style & NativeMethods.WS_SYSMENU) == 0)
+                    return true;
+
+                try
+                {
+                    using var process = System.Diagnostics.Process.GetProcessById((int)processId);
+                    title = process.ProcessName;
+                }
+                catch (ArgumentException)
+                {
+                    return true; // The process exited during enumeration.
+                }
+                catch (InvalidOperationException)
+                {
+                    return true;
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    return true;
+                }
+            }
+
+            result.Add((hwnd, title));
             return true;
         }, IntPtr.Zero);
 

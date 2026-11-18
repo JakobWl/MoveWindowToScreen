@@ -1,0 +1,20 @@
+<Window x:Class="MoveWindowToScreen.ShortcutDialog" x:ClassModifier="internal"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Keyboard shortcut" Width="390" SizeToContent="Height"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        Topmost="True" ShowInTaskbar="False">
+    <StackPanel Margin="20">
+        <Label Target="{Binding ElementName=ShortcutInput}" Padding="0"
+               Content="Press your new keyboard shortcut." />
+        <TextBox x:Name="ShortcutInput" IsReadOnly="True" Margin="0,8,0,0" Padding="6"
+                 PreviewKeyDown="ShortcutInput_KeyDown" />
+        <TextBlock x:Name="Status" TextWrapping="Wrap" Margin="0,8,0,12"
+                   Text="Use Ctrl, Alt, or Shift with a letter, number, or function key." />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Save" x:Name="SaveButton" IsDefault="True" IsEnabled="False"
+                    Click="Save_Click" MinWidth="78" Padding="6,3" Margin="0,0,8,0" />
+            <Button Content="Cancel" IsCancel="True" MinWidth="78" Padding="6,3" />
+        </StackPanel>
+    </StackPanel>
+</Window>
