@@ -91,8 +91,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: microsoft/microsoft-store-apppublisher@v1.1
-        with:
-          version: v0.4.4
       - name: Authenticate and verify app access
         shell: pwsh
         env:
@@ -119,13 +117,35 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $response = & msstore apps get $env:MSSTORE_APP_ID
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'Apps visible to these Partner Center credentials:'
+            & msstore apps list
+            throw "Partner Center credentials cannot access $env:MSSTORE_APP_ID. Use the same Entra app and seller as Zinsrechner."
+          }
           $app = ($response | Out-String) | ConvertFrom-Json
           if ($app.id -ne $env:MSSTORE_APP_ID) { throw 'Partner Center returned an unexpected app.' }
           Write-Host "Verified Store access for $($app.id)."
-          if ($env:RELEASE_MODE -eq 'publish' -and $app.pendingApplicationSubmission.id) {
-            throw 'An existing Store submission is pending. Resolve it in Partner Center before publishing.'
-          }
+      - name: Wait for existing Store submission to finish
+        if: inputs.mode == 'publish'
+        shell: pwsh
+        env:
+          MSSTORE_APP_ID: ${{ vars.MSSTORE_APP_ID }}
+        run: |
+          $deadline = (Get-Date).AddHours(2)
+          do {
+            $app = ((& msstore apps get $env:MSSTORE_APP_ID) | Out-String) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Could not retrieve Store application state.' }
+            if (!$app.pendingApplicationSubmission.id) { Write-Host 'No pending submission.'; break }
+            $submission = ((& msstore submission get $env:MSSTORE_APP_ID) | Out-String) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Could not retrieve pending submission state.' }
+            Write-Host "Existing submission $($submission.id): $($submission.status)"
+            if ($submission.status -in @('Pending','CommitFailed','PreProcessingFailed','CertificationFailed','ReleaseFailed')) {
+              Write-Host 'Existing submission is editable; it will be replaced.'
+              break
+            }
+            if ((Get-Date) -ge $deadline) { throw 'Existing Store submission remained locked for two hours.' }
+            Start-Sleep -Seconds 60
+          } while ($true)
       - uses: actions/download-artifact@v4
         if: inputs.mode == 'publish'
         with:
