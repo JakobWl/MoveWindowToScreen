@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <Nullable>enable</Nullable>
@@ -10,6 +10,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Platforms>x64;x86;AnyCPU</Platforms>
     <RuntimeIdentifiers>win-x64;win-x86</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(SelfContained)' == 'true' and ('$(Platform)' == 'x64' or '$(Platform)' == 'x86')">win-$(Platform)</RuntimeIdentifier>
     <AssemblyName>MoveWindowToScreen</AssemblyName>
     <RootNamespace>MoveWindowToScreen</RootNamespace>
     <Description>Move any window between monitors using a popup UI (Ctrl+Alt+M), system menu integration, or the system tray. Supports per-screen buttons, screen identification overlays, and Windows theme detection.</Description>

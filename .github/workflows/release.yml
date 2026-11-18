@@ -1,0 +1,145 @@
+name: Microsoft Store release
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build a package, verify Store access, or publish an update
+        type: choice
+        options: [build, verify, publish]
+        default: build
+      package_version:
+        description: Store version (major.minor.build.0). Required for publish.
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - name: Build x86 and x64 Store bundle
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+          RELEASE_MODE: ${{ inputs.mode }}
+        run: |
+          $manifestPath = Resolve-Path 'MoveWindowToScreen.Packaging/Package.appxmanifest'
+          [xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
+          $identity = $manifest.Package.Identity
+          if ($env:RELEASE_MODE -eq 'publish' -and !$env:PACKAGE_VERSION) {
+            throw 'Enter a new Store package version before publishing.'
+          }
+          if ($env:PACKAGE_VERSION) {
+            if ($env:PACKAGE_VERSION -notmatch '^[1-9][0-9]{0,4}\.[0-9]{1,5}\.[0-9]{1,5}\.0$' -or
+                @($env:PACKAGE_VERSION.Split('.') | Where-Object { [int]$_ -gt 65535 }).Count) {
+              throw 'Enter a Store version such as 1.0.2.0 with components at most 65535.'
+            }
+            $identity.Version = $env:PACKAGE_VERSION
+            $manifest.Save($manifestPath.Path)
+          }
+
+          $packageDir = Join-Path $env:RUNNER_TEMP 'StorePackages'
+          $buildArgs = @(
+            'MoveWindowToScreen.sln'
+            '/restore'
+            '/p:Configuration=Release'
+            '/p:Platform=x86'
+            '/p:AppxBundlePlatforms=x86|x64'
+            '/p:AppxBundle=Always'
+            '/p:UapAppxPackageBuildMode=StoreUpload'
+            "/p:AppxPackageDir=$packageDir/"
+            '/p:GenerateAppxPackageOnBuild=true'
+            '/p:AppxPackageSigningEnabled=false'
+            '/p:AppxAutoIncrementPackageRevision=false'
+            '/p:SelfContained=true'
+          )
+          & msbuild @buildArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $files = @(Get-ChildItem -LiteralPath $packageDir -Recurse -File |
+            Where-Object { $_.Extension -eq '.msixupload' })
+          if ($files.Count -ne 1) { throw "Expected one .msixupload file, found $($files.Count)." }
+          $uploadDir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'StoreUpload')
+          Copy-Item -LiteralPath $files[0].FullName -Destination $uploadDir.FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-package
+          path: ${{ runner.temp }}/StoreUpload/
+          if-no-files-found: error
+
+  store:
+    needs: build
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (inputs.mode == 'verify' || inputs.mode == 'publish')
+    runs-on: windows-2025
+    environment: microsoft-store
+    concurrency:
+      group: move-window-to-screen-store
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/microsoft-store-apppublisher@v1.1
+        with:
+          version: v0.4.4
+      - name: Authenticate and verify app access
+        shell: pwsh
+        env:
+          MSSTORE_APP_ID: ${{ vars.MSSTORE_APP_ID }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+          PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+        run: |
+          if ($env:MSSTORE_APP_ID -ne '9N66VVZBN23B') {
+            throw 'Set MSSTORE_APP_ID to the verified Store ID 9N66VVZBN23B.'
+          }
+          foreach ($name in 'PARTNER_CENTER_TENANT_ID','PARTNER_CENTER_SELLER_ID','PARTNER_CENTER_CLIENT_ID','PARTNER_CENTER_CLIENT_SECRET') {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing GitHub Actions secret $name."
+            }
+          }
+          msstore reconfigure `
+            --tenantId $env:PARTNER_CENTER_TENANT_ID `
+            --sellerId $env:PARTNER_CENTER_SELLER_ID `
+            --clientId $env:PARTNER_CENTER_CLIENT_ID `
+            --clientSecret $env:PARTNER_CENTER_CLIENT_SECRET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $response = & msstore apps get $env:MSSTORE_APP_ID
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $app = ($response | Out-String) | ConvertFrom-Json
+          if ($app.id -ne $env:MSSTORE_APP_ID) { throw 'Partner Center returned an unexpected app.' }
+          Write-Host "Verified Store access for $($app.id)."
+          if ($env:RELEASE_MODE -eq 'publish' -and $app.pendingApplicationSubmission.id) {
+            throw 'An existing Store submission is pending. Resolve it in Partner Center before publishing.'
+          }
+      - uses: actions/download-artifact@v4
+        if: inputs.mode == 'publish'
+        with:
+          name: store-package
+          path: store-package
+      - name: Submit Store update
+        if: inputs.mode == 'publish'
+        shell: pwsh
+        env:
+          MSSTORE_APP_ID: ${{ vars.MSSTORE_APP_ID }}
+        run: |
+          $uploads = @(Get-ChildItem -LiteralPath store-package -File |
+            Where-Object { $_.Extension -eq '.msixupload' })
+          if ($uploads.Count -ne 1) { throw 'Expected exactly one Store upload file.' }
+          Get-FileHash -LiteralPath $uploads[0].FullName -Algorithm SHA256
+          msstore publish $uploads[0].FullName --appId $env:MSSTORE_APP_ID
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

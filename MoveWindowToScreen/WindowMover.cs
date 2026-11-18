@@ -34,6 +34,7 @@ internal static class WindowMover
     /// </summary>
     public static void MoveWindowToMonitor(IntPtr hwnd, IntPtr targetMonitor)
     {
+        hwnd = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
         if (hwnd == IntPtr.Zero || targetMonitor == IntPtr.Zero)
             return;
 
@@ -50,8 +51,11 @@ internal static class WindowMover
             return;
         }
 
-        var srcInfo = GetMonitorInfo(sourceMonitor);
-        var tgtInfo = GetMonitorInfo(targetMonitor);
+        var srcInfo = new NativeMethods.MONITORINFO { cbSize = 40 };
+        var tgtInfo = new NativeMethods.MONITORINFO { cbSize = 40 };
+        if (!NativeMethods.GetMonitorInfo(sourceMonitor, ref srcInfo) ||
+            !NativeMethods.GetMonitorInfo(targetMonitor, ref tgtInfo))
+            return;
 
         bool wasMaximized = NativeMethods.IsZoomed(hwnd);
 
@@ -59,7 +63,12 @@ internal static class WindowMover
         if (wasMaximized)
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
 
-        NativeMethods.GetWindowRect(hwnd, out var windowRect);
+        if (!NativeMethods.GetWindowRect(hwnd, out var windowRect))
+        {
+            if (wasMaximized)
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWMAXIMIZED);
+            return;
+        }
 
         // Calculate relative position on source monitor's work area
         var srcWork = srcInfo.rcWork;
@@ -82,21 +91,19 @@ internal static class WindowMover
         newX = Math.Max(tgtWork.Left, Math.Min(newX, tgtWork.Left + tgtWork.Width - newW));
         newY = Math.Max(tgtWork.Top, Math.Min(newY, tgtWork.Top + tgtWork.Height - newH));
 
-        NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, newX, newY, newW, newH,
-            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+        const uint moveFlags = NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE;
+        NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, newX, newY, Math.Max(1, newW), Math.Max(1, newH),
+            moveFlags);
 
-        // Re-maximize on the target monitor if it was maximized before
+        // Some custom frames enforce a size or reposition themselves when resized.
+        // Retry with a position-only move, which also preserves fixed-size windows.
+        if (NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST) != targetMonitor)
+            NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, tgtWork.Left, tgtWork.Top, 0, 0,
+                moveFlags | NativeMethods.SWP_NOSIZE);
+
         if (wasMaximized)
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWMAXIMIZED);
 
-        // Bring the moved window to the front
         NativeMethods.SetForegroundWindow(hwnd);
-    }
-
-    private static NativeMethods.MONITORINFO GetMonitorInfo(IntPtr hMonitor)
-    {
-        var info = new NativeMethods.MONITORINFO { cbSize = 40 };
-        NativeMethods.GetMonitorInfo(hMonitor, ref info);
-        return info;
     }
 }

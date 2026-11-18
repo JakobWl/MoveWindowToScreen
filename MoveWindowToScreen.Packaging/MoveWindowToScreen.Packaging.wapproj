@@ -52,7 +52,7 @@
   <PropertyGroup>
     <ProjectGuid>499e9b58-6000-4139-88fc-6021aa6fe8ec</ProjectGuid>
     <TargetPlatformVersion>10.0.26100.0</TargetPlatformVersion>
-    <TargetPlatformMinVersion>10.0.14393.0</TargetPlatformMinVersion>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <DefaultLanguage>en-US</DefaultLanguage>
     <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
     <NoWarn>$(NoWarn);NU1702</NoWarn>
